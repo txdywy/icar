@@ -6,11 +6,6 @@
  *
  * Required env var:
  *   FIRECRAWL_API_KEY — Firecrawl API key
- *
- * Endpoints:
- *   GET /api/search?q=keyword
- *   GET /api/series/:id
- *   GET /api/health
  */
 
 // ── CORS helpers ────────────────────────────────────────────────────────
@@ -112,17 +107,75 @@ function calcOnRoadPrice(priceWan, energyType) {
   };
 }
 
+// ── Image extraction ────────────────────────────────────────────────────
+
+function extractCoverImage(md) {
+  // Find the main car image — typically the first image after the H1 title
+  // dongchedi uses: ![SeriesName](https://p*.dcd.byteimg.com/img/motor-mis-img/...)
+  const allImgs = [...md.matchAll(/!\[([^\]]*)\]\((https?:\/\/[^)]+)\)/g)];
+
+  for (const m of allImgs) {
+    const alt = m[1];
+    const url = m[2];
+    // Skip SVG placeholders, icons, logos, avatars, QR codes
+    if (url.includes("svg+xml")) continue;
+    if (url.includes("logo")) continue;
+    if (url.includes("passport")) continue;
+    if (url.includes("gongan")) continue;
+    if (url.includes("dcd-code")) continue;
+    if (url.includes("play-")) continue;
+    if (url.includes("360-")) continue;
+    if (url.includes("empty-envelope")) continue;
+    if (url.includes("dealer_")) continue;
+    if (url.includes("~80x0.image")) continue;
+    // The main cover usually has motor-mis-img or is after the H1
+    if (url.includes("motor-mis-img") || url.includes("tplv-resize:100:100")) {
+      // Upgrade to larger size
+      return url.replace("tplv-resize:100:100", "tplv-resize:400:400");
+    }
+  }
+
+  // Fallback: first non-placeholder image
+  for (const m of allImgs) {
+    const url = m[2];
+    if (!url.includes("svg+xml") && !url.includes("passport") && !url.includes("logo")) {
+      return url;
+    }
+  }
+
+  return "";
+}
+
+function extractGalleryImages(md) {
+  const allImgs = [...md.matchAll(/!\[([^\]]*)\]\((https?:\/\/[^)]+)\)/g)];
+  const gallery = [];
+  const seen = new Set();
+
+  for (const m of allImgs) {
+    const url = m[2];
+    // Only include actual car photos (motor-img domain, high-res)
+    if (!url.includes("dcd-sign.byteimg.com/motor-img/")) continue;
+    if (url.includes("svg+xml")) continue;
+    // Dedup by base URL (before ?params)
+    const base = url.split("?")[0];
+    if (seen.has(base)) continue;
+    seen.add(base);
+    gallery.push(url);
+    if (gallery.length >= 8) break;
+  }
+
+  return gallery;
+}
+
 // ── Markdown parsers ────────────────────────────────────────────────────
 
 function extractSeriesFromUrl(url) {
-  // https://www.dongchedi.com/auto/series/4363
-  const m = url.match(/\/auto\/series\/(\d+)/);
+  const m = url.match(/\/auto\/series\/(\d+)(?:\/|$)/);
   return m ? m[1] : null;
 }
 
 function parseSearchResults(searchData) {
   const results = [];
-  // Firecrawl search returns a list directly (not { web: [...] })
   const items = Array.isArray(searchData) ? searchData : (searchData.web || []);
 
   for (const item of items) {
@@ -133,18 +186,15 @@ function parseSearchResults(searchData) {
     const md = item.markdown || "";
     const title = item.title || "";
 
-    // Extract series name from title: "【Model Y】特斯拉_Model Y报价_Model Y图片_懂车帝"
     let seriesName = "";
     const nameMatch = title.match(/【(.+?)】/);
     if (nameMatch) seriesName = nameMatch[1];
     else seriesName = title.split(/[-_]/)[0].trim();
 
-    // Extract brand from title or description
     let brandName = "";
     const brandMatch = title.match(/】(.+?)_/);
     if (brandMatch) brandName = brandMatch[1];
 
-    // Extract price from markdown
     let guidePrice = "";
     const priceMatch = md.match(/指导价[：:]\s*([\d.]+-[\d.]+万|[\d.]+万)/);
     if (priceMatch) guidePrice = priceMatch[1].replace("万", "");
@@ -153,12 +203,12 @@ function parseSearchResults(searchData) {
       if (priceMatch2) guidePrice = priceMatch2[1];
     }
 
-    // Extract cover image
-    let cover = "";
-    const imgMatch = md.match(/!\[.*?\]\((https?:\/\/[^)]+)\)/);
-    if (imgMatch) cover = imgMatch[1];
+    let dealerPrice = "";
+    const dpMatch = md.match(/经销商报价\s*([\d.]+-[\d.]+万|[\d.]+万)/);
+    if (dpMatch) dealerPrice = dpMatch[1].replace("万", "");
 
-    // Energy type
+    const cover = extractCoverImage(md);
+
     let energyType = "";
     if (/纯电|EV|电动/i.test(md)) energyType = "纯电动";
     else if (/插混|PHEV/i.test(md)) energyType = "插电混动";
@@ -171,20 +221,24 @@ function parseSearchResults(searchData) {
       brandName,
       cover,
       guidePrice,
-      dealerPrice: "",
+      dealerPrice,
       energyType,
       url,
     });
   }
 
-  return results;
+  // Dedup by seriesId
+  const deduped = new Map();
+  for (const r of results) {
+    if (!deduped.has(r.seriesId)) deduped.set(r.seriesId, r);
+  }
+  return [...deduped.values()];
 }
 
 function parseSeriesDetail(scrapeData) {
   const md = scrapeData.markdown || "";
   const meta = scrapeData.metadata || {};
 
-  // Title: 【Model Y】特斯拉_Model Y报价_Model Y图片_懂车帝
   const title = meta.title || "";
   let seriesName = "";
   const nameMatch = title.match(/【(.+?)】/);
@@ -194,12 +248,10 @@ function parseSeriesDetail(scrapeData) {
   const brandMatch = title.match(/】(.+?)_/);
   if (brandMatch) brandName = brandMatch[1];
 
-  // Extract class/type: "特斯拉中国/中型SUV"
   let carType = "";
   const typeMatch = md.match(/# .+\n\n([^\n]+)/);
   if (typeMatch) carType = typeMatch[1].trim();
 
-  // Energy type
   let energyType = "";
   if (/纯电/i.test(carType) || /纯电/i.test(md)) energyType = "纯电动";
   else if (/插混|PHEV/i.test(md)) energyType = "插电混动";
@@ -207,7 +259,6 @@ function parseSeriesDetail(scrapeData) {
   else if (/混动/i.test(md)) energyType = "混动";
   else energyType = "燃油";
 
-  // Guide price: "厂商指导价26.35-31.35万"
   let guidePrice = "";
   const gpMatch = md.match(/厂商指导价\s*([\d.]+-[\d.]+万|[\d.]+万)/);
   if (gpMatch) guidePrice = gpMatch[1].replace("万", "");
@@ -216,17 +267,12 @@ function parseSeriesDetail(scrapeData) {
     if (gpMatch2) guidePrice = gpMatch2[1].replace("万", "");
   }
 
-  // Dealer price: "经销商报价 26.35-31.35万"
   let dealerPrice = "";
   const dpMatch = md.match(/经销商报价\s*([\d.]+-[\d.]+万|[\d.]+万)/);
   if (dpMatch) dealerPrice = dpMatch[1].replace("万", "");
 
-  // Extract cover image
-  let cover = "";
-  const coverMatch = md.match(/!\[Model Y\]\((https?:\/\/[^)]+)\)/);
-  if (coverMatch) cover = coverMatch[1];
-
-  // Parse individual car models from "车型列表" section
+  const cover = extractCoverImage(md);
+  const gallery = extractGalleryImages(md);
   const models = parseModelList(md);
 
   return {
@@ -237,21 +283,18 @@ function parseSeriesDetail(scrapeData) {
     guidePrice,
     dealerPrice,
     cover,
+    gallery,
     models,
   };
 }
 
 function parseModelList(md) {
   const models = [];
-
-  // Pattern: "[2026款 后轮驱动版](link)" ... "26.35万" ... "26.35万"
-  // We look for car model blocks
   const modelSection = md.split("车型列表")[1] || md;
   const lines = modelSection.split("\n");
 
   let currentModel = null;
   for (const line of lines) {
-    // Match model name: [2026款 后轮驱动版]
     const nameMatch = line.match(/\[(\d{4}款[^[\]]+)\]\(/);
     if (nameMatch) {
       if (currentModel) models.push(currentModel);
@@ -264,7 +307,6 @@ function parseModelList(md) {
     }
 
     if (currentModel) {
-      // Match price: "26.35万"
       const priceMatch = line.match(/^[\s]*([\d.]+)万[\s]*$/);
       if (priceMatch) {
         if (!currentModel.guidePrice) {
@@ -277,7 +319,6 @@ function parseModelList(md) {
   }
   if (currentModel) models.push(currentModel);
 
-  // If no models found, try alternative parsing
   if (models.length === 0) {
     const altMatches = md.matchAll(
       /\[(\d{4}款[^\]]+)\][\s\S]*?([\d.]+)万[\s\S]*?([\d.]+)万/g
@@ -302,7 +343,6 @@ async function handleSearch(q, apiKey) {
   try {
     const searchData = await firecrawlSearch(`懂车帝 ${q} 价格`, apiKey);
     const results = parseSearchResults(searchData);
-
     return json({ ok: true, query: q, results });
   } catch (err) {
     return json({ ok: false, error: err.message }, 502);
@@ -317,19 +357,14 @@ async function handleSeries(seriesId, apiKey) {
     const scrapeData = await firecrawlScrape(url, apiKey);
     const detail = parseSeriesDetail(scrapeData);
 
-    // Compute on-road prices
     if (detail.guidePrice) {
       const minPrice = parseFloat(detail.guidePrice.split("-")[0]);
       detail.onRoad = calcOnRoadPrice(minPrice, detail.energyType);
     }
 
-    // Add on-road for each model
     for (const model of detail.models) {
       if (model.guidePrice) {
-        model.onRoad = calcOnRoadPrice(
-          parseFloat(model.guidePrice),
-          detail.energyType
-        );
+        model.onRoad = calcOnRoadPrice(parseFloat(model.guidePrice), detail.energyType);
       }
     }
 
@@ -351,26 +386,12 @@ export default {
     const url = new URL(request.url);
     const { pathname } = url;
 
-    // Health check
-    if (pathname === "/api/health") {
-      return json({ ok: true, ts: Date.now() });
-    }
+    if (pathname === "/api/health") return json({ ok: true, ts: Date.now() });
+    if (pathname === "/api/search") return handleSearch(url.searchParams.get("q"), apiKey);
 
-    // Search: /api/search?q=xxx
-    if (pathname === "/api/search") {
-      return handleSearch(url.searchParams.get("q"), apiKey);
-    }
-
-    // Series detail: /api/series/{id}
     const seriesMatch = pathname.match(/^\/api\/series\/(\d+)/);
     if (seriesMatch) return handleSeries(seriesMatch[1], apiKey);
 
-    return json(
-      {
-        error: "not found",
-        endpoints: ["/api/search?q=", "/api/series/:id", "/api/health"],
-      },
-      404
-    );
+    return json({ error: "not found" }, 404);
   },
 };
