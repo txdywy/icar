@@ -6,64 +6,73 @@
 
 ```
 ┌──────────────────┐     ┌──────────────────────────┐     ┌──────────────┐
-│   GitHub Pages   │────▶│   Cloudflare Worker       │────▶│  懂车帝 API  │
-│   (纯静态前端)    │◀────│   (CORS 代理 + 数据聚合)   │◀────│  车型数据库   │
+│   GitHub Pages   │────▶│   Cloudflare Worker       │────▶│  Firecrawl   │
+│   (纯静态前端)    │◀────│   (CORS 代理 + 价格计算)   │◀────│  → 懂车帝     │
 └──────────────────┘     └──────────────────────────┘     └──────────────┘
 ```
 
 - **前端**：纯 HTML/CSS/JS，零框架依赖
-- **后端**：Cloudflare Worker（免费额度：10万请求/天）
-- **数据**：懂车帝公开 API（车型、配置、价格）
+- **后端**：Cloudflare Worker（免费 10万请求/天）
+- **数据**：Firecrawl 抓取懂车帝页面，绕过反爬虫保护
 - **部署**：GitHub Actions → GitHub Pages
 
 ## 功能
 
-- 🔍 智能搜索：输入车型关键词，实时联想推荐
+- 🔍 智能搜索：输入车型关键词，实时搜索懂车帝数据库
 - 💰 价格查询：厂商指导价 + 经销商报价
 - 📊 落地价计算：购置税 + 保险 + 上牌费，一键计算
-- 📋 配置对比：多车型参数横向对比表
+- 📋 车型列表：各年款在售/停售车型一览
 - 🔥 热门车型：一键查看主流热销车
+- ⚡ 新能源标识：纯电动车型购置税自动免征
 
 ## 快速开始
 
-### 1. 部署 Cloudflare Worker
+### 1. 获取 Firecrawl API Key
+
+注册 [Firecrawl](https://firecrawl.dev) 获取 API Key（免费额度即可）。
+
+### 2. 部署 Cloudflare Worker
 
 ```bash
 cd worker
 npm install
 npx wrangler login
+
+# 设置 Firecrawl API Key 为 Worker secret
+npx wrangler secret put FIRECRAWL_API_KEY
+# 粘贴你的 Firecrawl API Key
+
+# 部署
 npx wrangler deploy
 ```
 
 部署后记录 Worker URL（如 `https://icar-worker.xxx.workers.dev`）。
 
-### 2. 配置前端 API 地址
+### 3. 配置前端 API 地址
 
-编辑 `src/js/app.js`，修改 `CONFIG.API_BASE` 为你的 Worker URL：
+编辑 `src/js/app.js`，修改 `CONFIG.API_BASE`：
 
 ```js
 API_BASE: "https://icar-worker.xxx.workers.dev",
 ```
 
-### 3. 启用 GitHub Pages
+### 4. 启用 GitHub Pages
 
 1. 进入仓库 Settings → Pages
 2. Source 选择 "GitHub Actions"
 3. 推送代码后自动部署
 
-### 4. 本地开发
+### 5. 本地开发
 
 ```bash
 # Terminal 1: 启动 Worker
-cd worker && npm run dev
+cd worker && npx wrangler dev
 
-# Terminal 2: 启动前端（任意 HTTP 服务器）
-python3 -m http.server 8080
-# 或
-npx serve .
+# Terminal 2: 启动前端
+python3 -m http.server 8090
 ```
 
-访问 `http://localhost:8080`
+访问 `http://localhost:8090`
 
 ## 项目结构
 
@@ -74,7 +83,7 @@ icar/
 │   ├── css/style.css       # 样式
 │   └── js/app.js           # 前端逻辑
 ├── worker/
-│   ├── index.js            # Cloudflare Worker
+│   ├── index.js            # Cloudflare Worker (Firecrawl 代理)
 │   ├── wrangler.toml       # Worker 配置
 │   └── package.json
 └── .github/workflows/
@@ -86,14 +95,12 @@ icar/
 | 端点 | 说明 | 参数 |
 |------|------|------|
 | `GET /api/search?q=` | 搜索车型 | `q` 关键词 |
-| `GET /api/series/:id` | 车系详情 | `id` 车系ID |
-| `GET /api/config/:id` | 配置参数 | `id` 车系ID |
-| `GET /api/car/:id` | 单车信息 | `id` 车型ID |
+| `GET /api/series/:id` | 车系详情 + 落地价 | `id` 懂车帝车系ID |
 | `GET /api/health` | 健康检查 | — |
 
 ## 数据来源
 
-数据来自懂车帝公开 API，仅供学习参考。如用于商业用途，请自行确认数据授权。
+通过 Firecrawl 抓取懂车帝公开页面数据，仅供学习参考。如用于商业用途，请自行确认数据授权。
 
 ## License
 

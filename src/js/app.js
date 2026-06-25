@@ -99,9 +99,7 @@ async function apiSeriesDetail(seriesId) {
   return apiFetch(`/api/series/${seriesId}`);
 }
 
-async function apiConfig(seriesId) {
-  return apiFetch(`/api/config/${seriesId}`);
-}
+// Config is now included in series detail (models array)
 
 // ── Health Check ──────────────────────────────────────────────────────────
 
@@ -242,18 +240,14 @@ async function loadSeriesDetail(seriesId) {
   showLoading("加载车型详情...");
 
   try {
-    const [seriesData, configData] = await Promise.all([
-      apiSeriesDetail(seriesId),
-      apiConfig(seriesId),
-    ]);
-
+    const seriesData = await apiSeriesDetail(seriesId);
     hideOverlay();
 
     if (!seriesData.ok) throw new Error(seriesData.error || "加载失败");
 
     const detail = seriesData.detail;
     state.currentSeries = detail;
-    state.currentConfigs = configData.ok ? configData.configs : [];
+    state.currentConfigs = detail.models || [];
 
     renderSeriesDetail(detail, state.currentConfigs);
     showView("detail");
@@ -264,7 +258,7 @@ async function loadSeriesDetail(seriesId) {
   }
 }
 
-function renderSeriesDetail(detail, configs) {
+function renderSeriesDetail(detail, models) {
   // Hero
   if (detail.cover) {
     dom.detailCover.src = detail.cover;
@@ -275,7 +269,7 @@ function renderSeriesDetail(detail, configs) {
   }
 
   dom.detailTitle.textContent = detail.seriesName;
-  dom.detailSubtitle.textContent = [detail.brandName, detail.year, detail.energyType]
+  dom.detailSubtitle.textContent = [detail.brandName, detail.carType, detail.energyType]
     .filter(Boolean)
     .join(" · ");
 
@@ -283,13 +277,7 @@ function renderSeriesDetail(detail, configs) {
   dom.detailDealerPrice.textContent = detail.dealerPrice ? `${detail.dealerPrice}万` : "暂无";
 
   // Tags
-  if (detail.tags && detail.tags.length > 0) {
-    dom.detailTags.innerHTML = detail.tags
-      .map((t) => `<span class="detail-tag">${escapeHtml(typeof t === "string" ? t : t.name || "")}</span>`)
-      .join("");
-  } else {
-    dom.detailTags.innerHTML = "";
-  }
+  dom.detailTags.innerHTML = "";
 
   // Price breakdown
   if (detail.onRoad) {
@@ -301,14 +289,34 @@ function renderSeriesDetail(detail, configs) {
     dom.priceBreakdown.style.display = "none";
   }
 
-  // Config table
-  if (configs.length > 0) {
+  // Config table — now shows model variants
+  if (models.length > 0) {
     dom.configLoading.style.display = "none";
     dom.configTableWrap.style.display = "";
-    renderConfigTable(configs);
+    renderModelTable(models);
   } else {
-    dom.configLoading.innerHTML = '<div class="empty-illustration">📋</div><p>暂无配置数据</p>';
+    dom.configLoading.innerHTML = '<div class="empty-illustration">📋</div><p>暂无车型数据</p>';
   }
+}
+
+function renderModelTable(models) {
+  dom.configThead.innerHTML = `<tr>
+    <th style="min-width:200px;">车型</th>
+    <th>指导价</th>
+    <th>经销商报价</th>
+    <th>预估落地价</th>
+  </tr>`;
+
+  dom.configTbody.innerHTML = models
+    .map(
+      (m) => `<tr>
+        <td>${escapeHtml(m.name)}</td>
+        <td>${m.guidePrice ? escapeHtml(m.guidePrice) + "万" : "-"}</td>
+        <td>${m.dealerPrice ? escapeHtml(m.dealerPrice) + "万" : "-"}</td>
+        <td style="color:var(--c-onroad);font-weight:700;">${m.onRoad ? m.onRoad.totalOnRoadDisplay : "-"}</td>
+      </tr>`
+    )
+    .join("");
 }
 
 function renderPriceBreakdown(onRoad) {
@@ -333,47 +341,7 @@ function renderPriceBreakdown(onRoad) {
     .join("");
 }
 
-function renderConfigTable(configs) {
-  // Build spec rows
-  const rows = [
-    { key: "year", label: "年款" },
-    { key: "guidePrice", label: "指导价(万)" },
-    { key: "energyType", label: "能源类型" },
-    { key: "enginePower", label: "最大功率(kW)" },
-    { key: "engineTorque", label: "最大扭矩(N·m)" },
-    { key: "transmission", label: "变速箱" },
-    { key: "driveType", label: "驱动方式" },
-    { key: "zeroToHundred", label: "0-100km/h(s)" },
-    { key: "maxSpeed", label: "最高车速(km/h)" },
-    { key: "fuelConsumption", label: "油耗(L/100km)" },
-    { key: "bodyDimensions", label: "车身尺寸" },
-    { key: "wheelbase", label: "轴距(mm)" },
-    { key: "curbWeight", label: "整备质量(kg)" },
-    { key: "seats", label: "座位数" },
-    { key: "trunkVolume", label: "后备厢(L)" },
-  ];
-
-  // Filter rows that have at least one non-empty value
-  const activeRows = rows.filter((row) =>
-    configs.some((c) => c[row.key] && String(c[row.key]).trim())
-  );
-
-  // Thead
-  dom.configThead.innerHTML = `<tr>
-    <th style="min-width:160px;">参数</th>
-    ${configs.map((c) => `<th>${escapeHtml(c.carName || "")}</th>`).join("")}
-  </tr>`;
-
-  // Tbody
-  dom.configTbody.innerHTML = activeRows
-    .map(
-      (row) => `<tr>
-        <td>${row.label}</td>
-        ${configs.map((c) => `<td>${escapeHtml(String(c[row.key] || "-"))}</td>`).join("")}
-      </tr>`
-    )
-    .join("");
-}
+// renderModelTable defined above replaces renderConfigTable
 
 // ── Suggestions ──────────────────────────────────────────────────────────
 

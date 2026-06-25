@@ -1,27 +1,19 @@
 /**
- * iCar API Worker
+ * iCar API Worker — powered by Firecrawl
  *
- * Proxies requests to Chinese automotive data APIs (懂车帝 / dongchedi).
- * Handles CORS, caches aggressively, and computes 落地价 (on-road price).
+ * Uses Firecrawl to scrape dongchedi.com (懂车帝) for car data.
+ * Handles CORS, caching, and on-road price calculation.
+ *
+ * Required env var:
+ *   FIRECRAWL_API_KEY — Firecrawl API key
  *
  * Endpoints:
  *   GET /api/search?q=keyword
  *   GET /api/series/:id
- *   GET /api/config/:id
+ *   GET /api/health
  */
 
-const DCD_BASE = "https://www.dongchedi.com";
-const UA =
-  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
-
-const DCD_HEADERS = {
-  "User-Agent": UA,
-  Accept: "application/json",
-  Referer: "https://www.dongchedi.com/",
-  "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-};
-
-// ── helpers ──────────────────────────────────────────────────────────────
+// ── CORS helpers ────────────────────────────────────────────────────────
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -46,28 +38,56 @@ function cors() {
   });
 }
 
-async function dcdFetch(path, ttl = 300) {
-  const url = `${DCD_BASE}${path}`;
-  const resp = await fetch(url, { headers: DCD_HEADERS });
-  if (!resp.ok) throw new Error(`DCD ${resp.status}: ${path}`);
-  return resp.json();
+// ── Firecrawl fetcher ───────────────────────────────────────────────────
+
+async function firecrawlScrape(url, apiKey) {
+  const resp = await fetch("https://api.firecrawl.dev/v1/scrape", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      url,
+      formats: ["markdown"],
+      waitFor: 2000,
+    }),
+  });
+  if (!resp.ok) throw new Error(`Firecrawl scrape ${resp.status}`);
+  const data = await resp.json();
+  if (!data.success) throw new Error(data.error || "Firecrawl scrape failed");
+  return data.data;
+}
+
+async function firecrawlSearch(query, apiKey, limit = 8) {
+  const resp = await fetch("https://api.firecrawl.dev/v1/search", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      query: `site:dongchedi.com/auto/series ${query}`,
+      limit,
+      scrapeOptions: { formats: ["markdown"] },
+    }),
+  });
+  if (!resp.ok) throw new Error(`Firecrawl search ${resp.status}`);
+  const data = await resp.json();
+  if (!data.success) throw new Error(data.error || "Firecrawl search failed");
+  return data.data;
 }
 
 // ── 落地价计算 ────────────────────────────────────────────────────────────
 
-function calcOnRoadPrice(guidePrice, energyType) {
-  const price = Number(guidePrice) || 0;
+function calcOnRoadPrice(priceWan, energyType) {
+  const price = Number(priceWan) || 0;
   if (price <= 0) return null;
 
-  // 购置税：新能源免征，燃油车 ≈ 价格 ÷ 11.3
   const isNEV = /电动|插混|增程|混动|新能源|EV|PHEV|EREV/i.test(energyType || "");
-  const purchaseTax = isNEV ? 0 : Math.round(price * 10000 / 11.3);
-
-  // 交强险 950 + 商业险 ≈ 车价 × 4.5%
+  const purchaseTax = isNEV ? 0 : Math.round((price * 10000) / 11.3);
   const compulsoryInsurance = 950;
   const commercialInsurance = Math.round(price * 10000 * 0.045);
-
-  // 上牌费 + 车船税
   const registrationFee = 500;
   const vesselTax = 360;
 
@@ -92,106 +112,225 @@ function calcOnRoadPrice(guidePrice, energyType) {
   };
 }
 
-// ── 数据归一化 ─────────────────────────────────────────────────────────────
+// ── Markdown parsers ────────────────────────────────────────────────────
 
-function normalizeSearchResult(item) {
+function extractSeriesFromUrl(url) {
+  // https://www.dongchedi.com/auto/series/4363
+  const m = url.match(/\/auto\/series\/(\d+)/);
+  return m ? m[1] : null;
+}
+
+function parseSearchResults(searchData) {
+  const results = [];
+  // Firecrawl search returns a list directly (not { web: [...] })
+  const items = Array.isArray(searchData) ? searchData : (searchData.web || []);
+
+  for (const item of items) {
+    const url = item.url || "";
+    const seriesId = extractSeriesFromUrl(url);
+    if (!seriesId) continue;
+
+    const md = item.markdown || "";
+    const title = item.title || "";
+
+    // Extract series name from title: "【Model Y】特斯拉_Model Y报价_Model Y图片_懂车帝"
+    let seriesName = "";
+    const nameMatch = title.match(/【(.+?)】/);
+    if (nameMatch) seriesName = nameMatch[1];
+    else seriesName = title.split(/[-_]/)[0].trim();
+
+    // Extract brand from title or description
+    let brandName = "";
+    const brandMatch = title.match(/】(.+?)_/);
+    if (brandMatch) brandName = brandMatch[1];
+
+    // Extract price from markdown
+    let guidePrice = "";
+    const priceMatch = md.match(/指导价[：:]\s*([\d.]+-[\d.]+万|[\d.]+万)/);
+    if (priceMatch) guidePrice = priceMatch[1].replace("万", "");
+    else {
+      const priceMatch2 = md.match(/([\d.]+-[\d.]+)万/);
+      if (priceMatch2) guidePrice = priceMatch2[1];
+    }
+
+    // Extract cover image
+    let cover = "";
+    const imgMatch = md.match(/!\[.*?\]\((https?:\/\/[^)]+)\)/);
+    if (imgMatch) cover = imgMatch[1];
+
+    // Energy type
+    let energyType = "";
+    if (/纯电|EV|电动/i.test(md)) energyType = "纯电动";
+    else if (/插混|PHEV/i.test(md)) energyType = "插电混动";
+    else if (/增程/i.test(md)) energyType = "增程";
+    else if (/混动|HEV/i.test(md)) energyType = "混动";
+
+    results.push({
+      seriesId,
+      seriesName,
+      brandName,
+      cover,
+      guidePrice,
+      dealerPrice: "",
+      energyType,
+      url,
+    });
+  }
+
+  return results;
+}
+
+function parseSeriesDetail(scrapeData) {
+  const md = scrapeData.markdown || "";
+  const meta = scrapeData.metadata || {};
+
+  // Title: 【Model Y】特斯拉_Model Y报价_Model Y图片_懂车帝
+  const title = meta.title || "";
+  let seriesName = "";
+  const nameMatch = title.match(/【(.+?)】/);
+  if (nameMatch) seriesName = nameMatch[1];
+
+  let brandName = "";
+  const brandMatch = title.match(/】(.+?)_/);
+  if (brandMatch) brandName = brandMatch[1];
+
+  // Extract class/type: "特斯拉中国/中型SUV"
+  let carType = "";
+  const typeMatch = md.match(/# .+\n\n([^\n]+)/);
+  if (typeMatch) carType = typeMatch[1].trim();
+
+  // Energy type
+  let energyType = "";
+  if (/纯电/i.test(carType) || /纯电/i.test(md)) energyType = "纯电动";
+  else if (/插混|PHEV/i.test(md)) energyType = "插电混动";
+  else if (/增程/i.test(md)) energyType = "增程";
+  else if (/混动/i.test(md)) energyType = "混动";
+  else energyType = "燃油";
+
+  // Guide price: "厂商指导价26.35-31.35万"
+  let guidePrice = "";
+  const gpMatch = md.match(/厂商指导价\s*([\d.]+-[\d.]+万|[\d.]+万)/);
+  if (gpMatch) guidePrice = gpMatch[1].replace("万", "");
+  else {
+    const gpMatch2 = md.match(/指导价[：:]\s*([\d.]+-[\d.]+万|[\d.]+万)/);
+    if (gpMatch2) guidePrice = gpMatch2[1].replace("万", "");
+  }
+
+  // Dealer price: "经销商报价 26.35-31.35万"
+  let dealerPrice = "";
+  const dpMatch = md.match(/经销商报价\s*([\d.]+-[\d.]+万|[\d.]+万)/);
+  if (dpMatch) dealerPrice = dpMatch[1].replace("万", "");
+
+  // Extract cover image
+  let cover = "";
+  const coverMatch = md.match(/!\[Model Y\]\((https?:\/\/[^)]+)\)/);
+  if (coverMatch) cover = coverMatch[1];
+
+  // Parse individual car models from "车型列表" section
+  const models = parseModelList(md);
+
   return {
-    seriesId: item.series_id || item.seriesId,
-    seriesName: item.series_name || item.seriesName || item.name,
-    brandName: item.brand_name || item.brandName || "",
-    cover: item.cover || item.series_image || "",
-    dealerPrice: item.dealer_price || item.dealerPrice || "",
-    guidePrice: item.price || item.min_price || item.guidePrice || "",
-    energyType: item.energy_type || item.energyType || "",
-    year: item.year || "",
-    tags: item.tags || [],
+    seriesName,
+    brandName,
+    carType,
+    energyType,
+    guidePrice,
+    dealerPrice,
+    cover,
+    models,
   };
 }
 
-function normalizeSeriesDetail(data) {
-  const info = data || {};
-  return {
-    seriesId: info.series_id || info.id,
-    seriesName: info.series_name || info.name,
-    brandName: info.brand_name || info.brand || "",
-    cover: info.cover || info.image || "",
-    dealerPrice: info.dealer_price || "",
-    guidePrice: info.price || "",
-    minPrice: info.min_price || "",
-    maxPrice: info.max_price || "",
-    energyType: info.energy_type || "",
-    year: info.year || "",
-    saleStatus: info.sale_status || "",
-    outPrice: info.out_price_desc || "",
-    tags: info.tags || [],
-  };
+function parseModelList(md) {
+  const models = [];
+
+  // Pattern: "[2026款 后轮驱动版](link)" ... "26.35万" ... "26.35万"
+  // We look for car model blocks
+  const modelSection = md.split("车型列表")[1] || md;
+  const lines = modelSection.split("\n");
+
+  let currentModel = null;
+  for (const line of lines) {
+    // Match model name: [2026款 后轮驱动版]
+    const nameMatch = line.match(/\[(\d{4}款[^[\]]+)\]\(/);
+    if (nameMatch) {
+      if (currentModel) models.push(currentModel);
+      currentModel = {
+        name: nameMatch[1].trim(),
+        guidePrice: "",
+        dealerPrice: "",
+      };
+      continue;
+    }
+
+    if (currentModel) {
+      // Match price: "26.35万"
+      const priceMatch = line.match(/^[\s]*([\d.]+)万[\s]*$/);
+      if (priceMatch) {
+        if (!currentModel.guidePrice) {
+          currentModel.guidePrice = priceMatch[1];
+        } else if (!currentModel.dealerPrice) {
+          currentModel.dealerPrice = priceMatch[1];
+        }
+      }
+    }
+  }
+  if (currentModel) models.push(currentModel);
+
+  // If no models found, try alternative parsing
+  if (models.length === 0) {
+    const altMatches = md.matchAll(
+      /\[(\d{4}款[^\]]+)\][\s\S]*?([\d.]+)万[\s\S]*?([\d.]+)万/g
+    );
+    for (const m of altMatches) {
+      models.push({
+        name: m[1].trim(),
+        guidePrice: m[2],
+        dealerPrice: m[3],
+      });
+    }
+  }
+
+  return models;
 }
 
-function normalizeConfigItem(item) {
-  return {
-    carId: item.car_id || item.id,
-    carName: item.car_name || item.name,
-    year: item.year || "",
-    guidePrice: item.price || item.guide_price || "",
-    energyType: item.energy_type || "",
-    enginePower: item.engine_power || item.max_power || "",
-    engineTorque: item.engine_torque || item.max_torque || "",
-    transmission: item.gear_type || item.transmission || "",
-    bodyDimensions: item.body_dimensions || "",
-    wheelbase: item.wheelbase || "",
-    fuelType: item.fuel_type || "",
-    fuelConsumption: item.oil_wear || item.fuel_consumption || "",
-    seats: item.seat_num || item.seats || "",
-    zeroToHundred: item.zero_to_hundred || "",
-    maxSpeed: item.max_speed || "",
-    trunkVolume: item.trunk_volume || "",
-    curbWeight: item.kerb_weight || "",
-    driveType: item.drive_type || "",
-  };
-}
+// ── Route handlers ───────────────────────────────────────────────────────
 
-// ── route handlers ────────────────────────────────────────────────────────
-
-async function handleSearch(q) {
+async function handleSearch(q, apiKey) {
   if (!q) return json({ error: "missing query parameter q" }, 400);
 
   try {
-    const data = await dcdFetch(
-      `/motor/pc/car/series/search?keyword=${encodeURIComponent(q)}&count=20`
-    );
+    const searchData = await firecrawlSearch(`懂车帝 ${q} 价格`, apiKey);
+    const results = parseSearchResults(searchData);
 
-    const results = (data.data?.list || data.data || []).map(normalizeSearchResult);
     return json({ ok: true, query: q, results });
   } catch (err) {
-    // Fallback: try the v3 search API
-    try {
-      const data = await dcdFetch(
-        `/motor/pc/car/v3/search?keyword=${encodeURIComponent(q)}`
-      );
-      const raw = data.data?.series_list || data.data?.list || data.data || [];
-      const results = raw.map(normalizeSearchResult);
-      return json({ ok: true, query: q, results, source: "v3" });
-    } catch {
-      return json({ ok: false, error: err.message }, 502);
-    }
+    return json({ ok: false, error: err.message }, 502);
   }
 }
 
-async function handleSeries(seriesId) {
+async function handleSeries(seriesId, apiKey) {
   if (!seriesId) return json({ error: "missing series id" }, 400);
 
   try {
-    const data = await dcdFetch(
-      `/motor/pc/car/series/series_id?series_id=${seriesId}`
-    );
-    const detail = normalizeSeriesDetail(data.data);
+    const url = `https://www.dongchedi.com/auto/series/${seriesId}`;
+    const scrapeData = await firecrawlScrape(url, apiKey);
+    const detail = parseSeriesDetail(scrapeData);
 
-    // Compute on-road price
+    // Compute on-road prices
     if (detail.guidePrice) {
-      detail.onRoad = calcOnRoadPrice(
-        parseFloat(detail.guidePrice),
-        detail.energyType
-      );
+      const minPrice = parseFloat(detail.guidePrice.split("-")[0]);
+      detail.onRoad = calcOnRoadPrice(minPrice, detail.energyType);
+    }
+
+    // Add on-road for each model
+    for (const model of detail.models) {
+      if (model.guidePrice) {
+        model.onRoad = calcOnRoadPrice(
+          parseFloat(model.guidePrice),
+          detail.energyType
+        );
+      }
     }
 
     return json({ ok: true, detail });
@@ -200,59 +339,14 @@ async function handleSeries(seriesId) {
   }
 }
 
-async function handleConfig(seriesId) {
-  if (!seriesId) return json({ error: "missing series id" }, 400);
-
-  try {
-    const data = await dcdFetch(
-      `/motor/pc/car/config/series?series_id=${seriesId}`
-    );
-    const configs = (data.data?.list || data.data || []).map(normalizeConfigItem);
-
-    // Add on-road price for each config
-    for (const cfg of configs) {
-      if (cfg.guidePrice) {
-        cfg.onRoad = calcOnRoadPrice(
-          parseFloat(cfg.guidePrice),
-          cfg.energyType
-        );
-      }
-    }
-
-    return json({ ok: true, seriesId, configs });
-  } catch (err) {
-    return json({ ok: false, error: err.message }, 502);
-  }
-}
-
-async function handleCarInfo(carId) {
-  if (!carId) return json({ error: "missing car id" }, 400);
-
-  try {
-    const data = await dcdFetch(
-      `/motor/pc/car/info?car_id=${carId}`
-    );
-    const info = normalizeConfigItem(data.data || {});
-
-    if (info.guidePrice) {
-      info.onRoad = calcOnRoadPrice(
-        parseFloat(info.guidePrice),
-        info.energyType
-      );
-    }
-
-    return json({ ok: true, car: info });
-  } catch (err) {
-    return json({ ok: false, error: err.message }, 502);
-  }
-}
-
-// ── router ────────────────────────────────────────────────────────────────
+// ── Router ───────────────────────────────────────────────────────────────
 
 export default {
-  async fetch(request) {
-    // CORS preflight
+  async fetch(request, env) {
     if (request.method === "OPTIONS") return cors();
+
+    const apiKey = env.FIRECRAWL_API_KEY;
+    if (!apiKey) return json({ error: "FIRECRAWL_API_KEY not configured" }, 500);
 
     const url = new URL(request.url);
     const { pathname } = url;
@@ -264,21 +358,19 @@ export default {
 
     // Search: /api/search?q=xxx
     if (pathname === "/api/search") {
-      return handleSearch(url.searchParams.get("q"));
+      return handleSearch(url.searchParams.get("q"), apiKey);
     }
 
     // Series detail: /api/series/{id}
     const seriesMatch = pathname.match(/^\/api\/series\/(\d+)/);
-    if (seriesMatch) return handleSeries(seriesMatch[1]);
+    if (seriesMatch) return handleSeries(seriesMatch[1], apiKey);
 
-    // Config: /api/config/{id}
-    const configMatch = pathname.match(/^\/api\/config\/(\d+)/);
-    if (configMatch) return handleConfig(configMatch[1]);
-
-    // Car info: /api/car/{id}
-    const carMatch = pathname.match(/^\/api\/car\/(\d+)/);
-    if (carMatch) return handleCarInfo(carMatch[1]);
-
-    return json({ error: "not found", endpoints: ["/api/search", "/api/series/:id", "/api/config/:id", "/api/car/:id"] }, 404);
+    return json(
+      {
+        error: "not found",
+        endpoints: ["/api/search?q=", "/api/series/:id", "/api/health"],
+      },
+      404
+    );
   },
 };
