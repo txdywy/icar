@@ -67,7 +67,7 @@ async function firecrawlSearch(query, apiKey, limit = 8) {
       Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify({
-      query: `site:dongchedi.com/auto/series ${query}`,
+      query: `${query} 懂车帝 报价 参数`,
       limit,
       scrapeOptions: { formats: ["markdown"] },
     }),

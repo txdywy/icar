@@ -12,9 +12,7 @@ const CONFIG = {
   API_BASE: (() => {
     const isLocal = location.hostname === "localhost" || location.hostname === "127.0.0.1";
     if (isLocal) return "http://localhost:8787";
-    // 如果 Worker 绑定了自定义域名，使用域名；否则使用 workers.dev 地址
-    // 部署后修改为你的实际 Worker URL
-    return "https://icar-worker.YOUR_SUBDOMAIN.workers.dev";
+    return "https://icar-worker.andylaw2017.workers.dev";
   })(),
 
   DEBOUNCE_MS: 400,
