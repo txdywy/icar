@@ -1,0 +1,5 @@
+# Cloudflare Worker - iCar API Proxy
+# Deploy: `npx wrangler deploy` from worker/ directory
+node_modules/
+.wrangler/
+.dev.vars
